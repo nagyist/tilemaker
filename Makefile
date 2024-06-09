@@ -56,8 +56,10 @@ ifeq ($(LUA_CMD),luajit)
   LUA_CFLAGS := ${LUA_CFLAGS} -DLUAJIT
   ifneq ($(OS),Windows_NT)
     ifeq ($(shell uname -s), Darwin)
-      LDFLAGS := -pagezero_size 10000 -image_base 100000000
-      $(info - with MacOS LuaJIT linking)
+      ifeq ($(LUA_JITV),2.0)
+        LDFLAGS := -pagezero_size 10000 -image_base 100000000
+        $(info - with MacOS LuaJIT linking)
+      endif
     endif
   endif
 endif
@@ -114,6 +116,7 @@ tilemaker: \
 	src/sorted_node_store.o \
 	src/sorted_way_store.o \
 	src/tag_map.o \
+	src/tile_coordinates_set.o \
 	src/tile_data.o \
 	src/tilemaker.o \
 	src/tile_worker.o \
@@ -125,12 +128,14 @@ test: \
 	test_attribute_store \
 	test_deque_map \
 	test_helpers \
+	test_options_parser \
 	test_pbf_reader \
 	test_pooled_string \
 	test_relation_roles \
 	test_significant_tags \
 	test_sorted_node_store \
-	test_sorted_way_store
+	test_sorted_way_store \
+	test_tile_coordinates_set
 
 test_append_vector: \
 	src/mmap_allocator.o \
@@ -192,6 +197,11 @@ test_sorted_way_store: \
 	src/sorted_way_store.o \
 	test/sorted_way_store.test.o
 	$(CXX) $(CXXFLAGS) -o test.sorted_way_store $^ $(INC) $(LIB) $(LDFLAGS) && ./test.sorted_way_store
+
+test_tile_coordinates_set: \
+	src/tile_coordinates_set.o \
+	test/tile_coordinates_set.test.o
+	$(CXX) $(CXXFLAGS) -o test.tile_coordinates_set $^ $(INC) $(LIB) $(LDFLAGS) && ./test.tile_coordinates_set
 
 test_pbf_reader: \
 	src/helpers.o \

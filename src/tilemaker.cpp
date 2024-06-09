@@ -122,7 +122,10 @@ int main(const int argc, const char* argv[]) {
 
 	bool hasClippingBox = false;
 	Box clippingBox;
-	double minLon=0.0, maxLon=0.0, minLat=0.0, maxLat=0.0;
+	double minLon=std::numeric_limits<double>::max(),
+				 maxLon=std::numeric_limits<double>::min(),
+				 minLat=std::numeric_limits<double>::max(),
+				 maxLat=std::numeric_limits<double>::min();
 	if (!bboxElements.empty()) {
 		hasClippingBox = true;
 		minLon = bboxElementFromStr(bboxElements.at(0));
@@ -131,8 +134,20 @@ int main(const int argc, const char* argv[]) {
 		maxLat = bboxElementFromStr(bboxElements.at(3));
 
 	} else if (options.inputFiles.size()>0) {
-		int ret = ReadPbfBoundingBox(options.inputFiles[0], minLon, maxLon, minLat, maxLat, hasClippingBox);
-		if(ret != 0) return ret;
+		for (const auto inputFile : options.inputFiles) {
+			bool localHasClippingBox;
+			double localMinLon, localMaxLon, localMinLat, localMaxLat;
+			int ret = ReadPbfBoundingBox(inputFile, localMinLon, localMaxLon, localMinLat, localMaxLat, localHasClippingBox);
+			if(ret != 0) return ret;
+			hasClippingBox = hasClippingBox || localHasClippingBox;
+
+			if (localHasClippingBox) {
+				minLon = std::min(minLon, localMinLon);
+				maxLon = std::max(maxLon, localMaxLon);
+				minLat = std::min(minLat, localMinLat);
+				maxLat = std::max(maxLat, localMaxLat);
+			}
+		}
 	}
 
 	if (hasClippingBox) {
@@ -179,7 +194,7 @@ int main(const int argc, const char* argv[]) {
 			return rv;
 		}
 
-		if (allPbfsHaveSortTypeThenID) {
+		if (options.inputFiles.size() == 1 && allPbfsHaveSortTypeThenID) {
 			std::shared_ptr<NodeStore> rv = make_shared<SortedNodeStore>(!options.osm.uncompressedNodes);
 			return rv;
 		}
@@ -198,7 +213,7 @@ int main(const int argc, const char* argv[]) {
 	}
 
 	auto createWayStore = [anyPbfHasLocationsOnWays, allPbfsHaveSortTypeThenID, options, &nodeStore]() {
-		if (!anyPbfHasLocationsOnWays && allPbfsHaveSortTypeThenID) {
+		if (options.inputFiles.size() == 1 && !anyPbfHasLocationsOnWays && allPbfsHaveSortTypeThenID) {
 			std::shared_ptr<WayStore> rv = make_shared<SortedWayStore>(!options.osm.uncompressedWays, *nodeStore.get());
 			return rv;
 		}
@@ -225,8 +240,10 @@ int main(const int argc, const char* argv[]) {
 	AttributeStore attributeStore;
 
 	class LayerDefinition layers(config.layers);
-	class OsmMemTiles osmMemTiles(options.threadNum, config.baseZoom, config.includeID, *nodeStore, *wayStore);
-	class ShpMemTiles shpMemTiles(options.threadNum, config.baseZoom);
+
+	const unsigned int indexZoom = std::min(config.baseZoom, 14u);
+	class OsmMemTiles osmMemTiles(options.threadNum, indexZoom, config.includeID, *nodeStore, *wayStore);
+	class ShpMemTiles shpMemTiles(options.threadNum, indexZoom);
 	osmMemTiles.open();
 	shpMemTiles.open();
 
@@ -280,12 +297,18 @@ int main(const int argc, const char* argv[]) {
 			significantWayTags,
 			options.threadNum,
 			[&]() {
-				thread_local std::shared_ptr<ifstream> pbfStream(new ifstream(inputFile, ios::in | ios::binary));
-				return pbfStream;
+				thread_local std::pair<std::string, std::shared_ptr<ifstream>> pbfStream;
+				if (pbfStream.first != inputFile) {
+					pbfStream = std::make_pair(inputFile, std::make_shared<ifstream>(inputFile, ios::in | ios::binary));
+				}
+				return pbfStream.second;
 			},
 			[&]() {
-				thread_local std::shared_ptr<OsmLuaProcessing> osmLuaProcessing(new OsmLuaProcessing(osmStore, config, layers, options.luaFile, shpMemTiles, osmMemTiles, attributeStore, options.osm.materializeGeometries));
-				return osmLuaProcessing;
+				thread_local std::pair<std::string, std::shared_ptr<OsmLuaProcessing>> osmLuaProcessing;
+				if (osmLuaProcessing.first != inputFile) {
+					osmLuaProcessing = std::make_pair(inputFile, std::make_shared<OsmLuaProcessing>(osmStore, config, layers, options.luaFile, shpMemTiles, osmMemTiles, attributeStore, options.osm.materializeGeometries));
+				}
+				return osmLuaProcessing.second;
 			},
 			*nodeStore,
 			*wayStore
@@ -332,7 +355,7 @@ int main(const int argc, const char* argv[]) {
 	// The clipping bbox check is expensive - as an optimization, compute the set of
 	// z6 tiles that are wholly covered by the clipping box. Membership in this
 	// set is quick to test.
-	TileCoordinatesSet coveredZ6Tiles(6);
+	PreciseTileCoordinatesSet coveredZ6Tiles(6);
 	if (hasClippingBox) {
 		for (int x = 0; x < 1 << 6; x++) {
 			for (int y = 0; y < 1 << 6; y++) {
@@ -352,9 +375,12 @@ int main(const int argc, const char* argv[]) {
 	}
 
 	std::deque<std::pair<unsigned int, TileCoordinates>> tileCoordinates;
-	std::vector<TileCoordinatesSet> zoomResults;
-	for (uint zoom = 0; zoom <= sharedData.config.endZoom; zoom++) {
-		zoomResults.push_back(TileCoordinatesSet(zoom));
+	std::vector<std::shared_ptr<TileCoordinatesSet>> zoomResults;
+	zoomResults.reserve(sharedData.config.endZoom + 1);
+
+	// Add PreciseTileCoordinatesSet, but only up to z14.
+	for (uint zoom = 0; zoom <= std::min(14u, sharedData.config.endZoom); zoom++) {
+		zoomResults.emplace_back(std::make_shared<PreciseTileCoordinatesSet>(zoom));
 	}
 
 	{
@@ -371,6 +397,11 @@ int main(const int argc, const char* argv[]) {
 #endif
 	}
 
+	// Add LossyTileCoordinatesSet, if needed
+	for (uint zoom = 15u; zoom <= sharedData.config.endZoom; zoom++) {
+		zoomResults.emplace_back(std::make_shared<LossyTileCoordinatesSet>(zoom, *zoomResults[14]));
+	}
+
 	std::cout << ", filtering tiles:" << std::flush;
 	for (uint zoom=sharedData.config.startZoom; zoom <= sharedData.config.endZoom; zoom++) {
 		std::cout << " z" << std::to_string(zoom) << std::flush;
@@ -383,7 +414,7 @@ int main(const int argc, const char* argv[]) {
 		int numTiles = 0;
 		for (int x = 0; x < 1 << zoom; x++) {
 			for (int y = 0; y < 1 << zoom; y++) {
-				if (!zoomResult.test(x, y))
+				if (!zoomResult->test(x, y))
 					continue;
 			
 				if (hasClippingBox) {
